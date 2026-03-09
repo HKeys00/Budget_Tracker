@@ -1,9 +1,18 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>BudgetTracker</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Excel reading/writing -->
+    <PackageReference Include="EPPlus" Version="7.0.0" />
+    <!-- SQLite via Microsoft.Data.Sqlite -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
+  </ItemGroup>
 
 </Project>
