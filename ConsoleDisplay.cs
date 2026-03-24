@@ -28,7 +28,7 @@ public static class ConsoleDisplay
     public static void SectionHeader(string title)
     {
         Console.ForegroundColor = ConsoleColor.DarkCyan;
-        Console.WriteLine($"\n  ┌─ {title} -┐");
+        Console.WriteLine($"\n  ┌─ {title} ─┐");
         Console.ResetColor();
     }
 
@@ -78,9 +78,11 @@ public static class ConsoleDisplay
         Console.WriteLine("\n  ┌─ Main Menu ────────────────────────────┐");
         Console.ResetColor();
         Console.WriteLine("    [1] Import Excel spreadsheet");
-        Console.WriteLine("    [2] View spending summary");
-        Console.WriteLine("    [3] View recent transactions");
-        Console.WriteLine("    [4] Exit");
-        Console.Write("\n  Enter number (1–4): ");
+        Console.WriteLine("    [2] All-time spending summary");
+        Console.WriteLine("    [3] Monthly overview  (all months)");
+        Console.WriteLine("    [4] Monthly detail    (pick a month)");
+        Console.WriteLine("    [5] View recent transactions");
+        Console.WriteLine("    [6] Exit");
+        Console.Write("\n  Enter number (1–6): ");
     }
 }
