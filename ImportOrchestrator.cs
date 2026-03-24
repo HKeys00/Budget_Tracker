@@ -1,9 +1,16 @@
 // =============================================================================
 // Services/ImportOrchestrator.cs
 // Coordinates the full import pipeline:
-//   1. Parse Excel rows
-//   2. For each row, resolve Type and Category via DB (with user interaction)
-//   3. Persist finalised transactions and update description mappings
+//
+//   For each row in the spreadsheet:
+//     1. Show a discard prompt — user can skip the transaction entirely
+//     2. Look up the description in DescriptionMappings
+//        a. KNOWN description → suggest previous Category + Type; user confirms or changes
+//        b. NEW description   → user picks/creates a Category, then picks Need / Want / Income
+//     3. Persist the transaction and update the description mapping
+//
+// Neither Type nor Category is read from the spreadsheet — the database memory
+// and user input are the only sources of truth.
 // =============================================================================
 
 using BudgetTracker.Data;
@@ -14,18 +21,22 @@ namespace BudgetTracker.Services;
 
 public class ImportOrchestrator
 {
-    private readonly ExcelImportService    _excel;
-    private readonly CategoryRepository   _categories;
-    private readonly MappingRepository    _mappings;
+    // Type names that flag a row as income rather than an expense.
+    private static readonly HashSet<string> IncomeTypeNames =
+        new(StringComparer.OrdinalIgnoreCase) { "Income" };
+
+    private readonly ExcelImportService     _excel;
+    private readonly CategoryRepository    _categories;
+    private readonly MappingRepository     _mappings;
     private readonly TransactionRepository _transactions;
-    private readonly ConsolePrompt         _prompt;
+    private readonly ConsolePrompt          _prompt;
 
     public ImportOrchestrator(
-        ExcelImportService    excel,
-        CategoryRepository    categories,
-        MappingRepository     mappings,
-        TransactionRepository transactions,
-        ConsolePrompt         prompt)
+        ExcelImportService     excel,
+        CategoryRepository     categories,
+        MappingRepository      mappings,
+        TransactionRepository  transactions,
+        ConsolePrompt           prompt)
     {
         _excel        = excel;
         _categories   = categories;
@@ -40,7 +51,7 @@ public class ImportOrchestrator
 
     /// <summary>
     /// Runs the full import for the given file path.
-    /// Returns the number of transactions saved.
+    /// Returns (saved, skipped) counts.
     /// </summary>
     public int Import(string filePath)
     {
@@ -54,125 +65,207 @@ public class ImportOrchestrator
         catch (Exception ex)
         {
             ConsoleDisplay.Error($"Could not read spreadsheet: {ex.Message}");
-            return 0;
+            return (0);
         }
 
         if (rows.Count == 0)
         {
             ConsoleDisplay.Warning("No data rows found in the spreadsheet.");
-            return 0;
+            return (0);
         }
 
         Console.WriteLine($"  Found {rows.Count} transaction(s) to process.\n");
 
-        int saved = 0;
+        int saved   = 0;
+        int skipped = 0;
 
         for (int i = 0; i < rows.Count; i++)
         {
             var row = rows[i];
             ConsoleDisplay.TransactionHeader(i + 1, rows.Count, row);
 
-            // ---- Resolve TransactionType ----
-            var type = _categories.GetOrCreateType(
-                string.IsNullOrWhiteSpace(row.TypeRaw) ? "Unknown" : row.TypeRaw);
-
-            // ---- Resolve Category ----
-            // Ensure the category from the sheet exists in the DB first.
-            Category sheetCategory = _categories.GetOrCreate(row.CategoryRaw);
-
-            // Check if we've seen this description before.
-            Category? previousCategory = _mappings.GetCategoryForDescription(row.Description);
-
-            Category chosenCategory;
-
-            if (previousCategory != null)
+            // ---- Step 1: discard gate ----
+            if (ShouldDiscard())
             {
-                // Known merchant — offer to reuse or override.
-                chosenCategory = ResolveKnownDescription(row.Description, previousCategory, sheetCategory);
-            }
-            else
-            {
-                // Brand new description — show all available categories.
-                chosenCategory = ResolveNewDescription(row.Description, sheetCategory);
+                ConsoleDisplay.Warning("  Transaction discarded — skipping.");
+                Console.WriteLine();
+                skipped++;
+                continue;
             }
 
-            // ---- Persist ----
+            // ---- Step 2: resolve Category + Type via description lookup ----
+            var (chosenCategory, chosenType) = ResolveClassification(row.Description);
+
+            bool isIncome = IncomeTypeNames.Contains(chosenType.Name);
+
+            // ---- Step 3: persist ----
             var transaction = new Transaction
             {
                 Date        = row.Date,
                 Cost        = row.Cost,
                 Description = row.Description,
-                TypeId      = type.Id,
+                IsExpense   = !isIncome,
+                TypeId      = chosenType.Id,
                 CategoryId  = chosenCategory.Id
             };
 
             _transactions.Insert(transaction);
-            _mappings.Upsert(row.Description, chosenCategory.Id);
+            _mappings.Upsert(row.Description, chosenCategory.Id, chosenType.Id);
 
-            ConsoleDisplay.Success($"  Saved → Category: {chosenCategory.Name} | Type: {type.Name}");
+            string expenseLabel = isIncome ? "Income" : "Expense";
+            ConsoleDisplay.Success(
+                $"  Saved [{expenseLabel}] → Category: {chosenCategory.Name} | Type: {chosenType.Name}");
             Console.WriteLine();
             saved++;
         }
 
-        return saved;
+        return (saved);
     }
 
     // -------------------------------------------------------------------------
-    // Category resolution helpers
+    // Discard prompt
+    // -------------------------------------------------------------------------
+
+    /// <summary>Returns true if the user chose to discard this transaction.</summary>
+    private bool ShouldDiscard()
+    {
+        int choice = _prompt.ChooseOption(
+            "What would you like to do with this transaction?",
+            new List<string> { "Save this transaction", "Discard (skip) this transaction" });
+
+        return choice == 1;
+    }
+
+    // -------------------------------------------------------------------------
+    // Classification resolution
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// For a previously seen description, ask the user whether to reuse the
-    /// remembered category, use the one from the spreadsheet, or pick another.
+    /// Returns the final (Category, Type) pair for a transaction, either by
+    /// suggesting a remembered match or by prompting the user from scratch.
     /// </summary>
-    private Category ResolveKnownDescription(
-        string description, Category previous, Category fromSheet)
+    private (Category Category, TransactionType Type) ResolveClassification(string description)
     {
-        Console.WriteLine($"  \u2139  '{description}' was previously categorised as: [{previous.Name}]");
+        var match = _mappings.GetMapping(description);
 
-        // Build options list
-        var options = new List<(string Label, Func<Category> Resolve)>();
-
-        // Option 1: reuse previous
-        options.Add(($"Keep previous category: {previous.Name}", () => previous));
-
-        // Option 2: use sheet value (only if different from previous)
-        if (!string.Equals(fromSheet.Name, previous.Name, StringComparison.OrdinalIgnoreCase))
-            options.Add(($"Use spreadsheet category: {fromSheet.Name}", () => fromSheet));
-
-        // Option 3+: any other category already in the DB
-        var allCategories = _categories.GetAll();
-        foreach (var cat in allCategories)
+        if (match != null && match.Type.Id != 0)
         {
-            if (cat.Id != previous.Id && cat.Id != fromSheet.Id)
-                options.Add(($"Choose: {cat.Name}", () => cat));
+            // Known description — offer to keep previous classification or change it.
+            return ResolveKnownDescription(description, match);
         }
-
-        int choice = _prompt.ChooseOption("  Select a category option:", options.Select(o => o.Label).ToList());
-        return options[choice].Resolve();
+        else
+        {
+            // Brand-new description — walk the user through picking category then type.
+            return ResolveNewDescription(description);
+        }
     }
 
-    /// <summary>
-    /// For a brand-new description, show all categories from the DB (which now
-    /// includes the one from the sheet) and let the user pick.
-    /// </summary>
-    private Category ResolveNewDescription(string description, Category fromSheet)
-    {
-        Console.WriteLine($"  \u2605  New location: '{description}'");
-        Console.WriteLine($"     Spreadsheet suggests category: [{fromSheet.Name}]");
+    // -------------------------------------------------------------------------
+    // Known description flow
+    // -------------------------------------------------------------------------
 
+    /// <summary>
+    /// Offers three options for a previously seen description:
+    ///   [1] Keep everything as before
+    ///   [2] Change category only
+    ///   [3] Change type (Need / Want / Income) only
+    ///   [4] Change both
+    /// </summary>
+    private (Category, TransactionType) ResolveKnownDescription(
+        string description, DescriptionMatch previous)
+    {
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine(
+            $"\n  ℹ  '{description}' was previously: " +
+            $"Category [{previous.Category.Name}] | Type [{previous.Type.Name}]");
+        Console.ResetColor();
+
+        int action = _prompt.ChooseOption(
+            "What would you like to do?",
+            new List<string>
+            {
+                $"Keep previous  →  {previous.Category.Name} / {previous.Type.Name}",
+                "Change category only",
+                "Change type (Need / Want / Income) only",
+                "Change both category and type"
+            });
+
+        var category = previous.Category;
+        var type     = previous.Type;
+
+        if (action == 1 || action == 3)   // change category
+            category = PickCategory(preselectedName: previous.Category.Name);
+
+        if (action == 2 || action == 3)   // change type
+            type = PickType();
+
+        return (category, type);
+    }
+
+    // -------------------------------------------------------------------------
+    // New description flow
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Walks the user through picking a category (from existing list or creating
+    /// a new one) and then choosing Need / Want / Income.
+    /// </summary>
+    private (Category, TransactionType) ResolveNewDescription(string description)
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine($"\n  ★  New description: '{description}'");
+        Console.ResetColor();
+
+        var category = PickCategory(preselectedName: null);
+        var type     = PickType();
+
+        return (category, type);
+    }
+
+    // -------------------------------------------------------------------------
+    // Shared sub-prompts
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Shows the list of all categories currently in the DB, with a "create new"
+    /// option at the bottom.  <paramref name="preselectedName"/> is shown as
+    /// "(current)" to make it easy to spot when changing.
+    /// </summary>
+    private Category PickCategory(string? preselectedName)
+    {
         var allCategories = _categories.GetAll();
 
-        // Put the sheet's suggested category first for convenience
-        var ordered = allCategories
-            .OrderBy(c => c.Id != fromSheet.Id)   // false (0) sorts before true (1)
-            .ThenBy(c => c.Name)
+        // Build display labels, marking the current selection if provided.
+        var labels = allCategories
+            .Select(c => string.Equals(c.Name, preselectedName, StringComparison.OrdinalIgnoreCase)
+                ? $"{c.Name}  (current)"
+                : c.Name)
             .ToList();
 
-        int choice = _prompt.ChooseOption(
-            "  Select a category for this transaction:",
-            ordered.Select(c => c.Id == fromSheet.Id ? $"{c.Name} (suggested)" : c.Name).ToList());
+        string chosenName = _prompt.ChooseOrCreateCategory(
+            "Select a category:", labels);
 
-        return ordered[choice];
+        // ChooseOrCreateCategory returns a name; persist it if it's brand new.
+        return _categories.GetOrCreate(chosenName);
+    }
+
+    /// <summary>
+    /// Asks the user to choose between Need, Want, or Income.
+    /// Existing type records are reused; new ones are created as needed.
+    /// </summary>
+    private TransactionType PickType()
+    {
+        // These are the standard options always offered.
+        // Any additional types already in the DB are appended for completeness.
+        var standardTypes = new List<string> { "Need", "Want", "Income" };
+        var dbTypes       = _categories.GetAllTypes().Select(t => t.Name).ToList();
+
+        // Merge: standard first, then any DB types not already in the standard list.
+        var allTypeNames = standardTypes
+            .Concat(dbTypes.Where(t => !standardTypes.Contains(t, StringComparer.OrdinalIgnoreCase)))
+            .ToList();
+
+        int choice = _prompt.ChooseOption("Select type:", allTypeNames);
+        return _categories.GetOrCreateType(allTypeNames[choice]);
     }
 }

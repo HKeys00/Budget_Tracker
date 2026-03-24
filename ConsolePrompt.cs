@@ -1,7 +1,9 @@
 // =============================================================================
 // UI/ConsolePrompt.cs
 // Handles all interactive user input via numbered lists.
-// The user always enters a number — never free text — to select an option.
+// The user always enters a number — never free text for selections.
+// The one exception is creating a brand-new category name, which requires
+// typed input.
 // =============================================================================
 
 namespace BudgetTracker.UI;
@@ -43,6 +45,55 @@ public class ConsolePrompt
 
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"  Invalid input. Please enter a number between 1 and {options.Count}.");
+            Console.ResetColor();
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Category picker — choose existing or type a new name
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Shows a numbered list of existing category names, with a final option to
+    /// create a brand-new one by typing its name.
+    ///
+    /// Returns the name of the chosen or newly entered category (never null/empty).
+    /// The caller is responsible for calling CategoryRepository.GetOrCreate() with
+    /// the returned name to obtain or persist the actual Category entity.
+    /// </summary>
+    public string ChooseOrCreateCategory(string prompt, List<string> existingNames)
+    {
+        // Build the display list: existing names first, then "Enter new…" sentinel.
+        const string CreateNewLabel = "Enter a new category name";
+        var displayOptions = new List<string>(existingNames) { CreateNewLabel };
+
+        int choice = ChooseOption(prompt, displayOptions);
+
+        if (choice < existingNames.Count)
+        {
+            // User picked an existing category.
+            return existingNames[choice];
+        }
+
+        // User wants to create a new category — prompt for free-text name.
+        return ReadNewCategoryName();
+    }
+
+    /// <summary>
+    /// Reads a non-blank category name from the console, looping until one is given.
+    /// </summary>
+    private static string ReadNewCategoryName()
+    {
+        while (true)
+        {
+            Console.Write("\n  Enter new category name: ");
+            string? name = Console.ReadLine()?.Trim();
+
+            if (!string.IsNullOrWhiteSpace(name))
+                return name;
+
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("  Category name cannot be empty. Please try again.");
             Console.ResetColor();
         }
     }

@@ -18,6 +18,8 @@ public class Transaction
     /// <summary>Description or merchant name (e.g. "Woolworths", "Netflix").</summary>
     public string Description { get; set; } = string.Empty;
 
+    public bool IsExpense { get; set; }
+
     /// <summary>FK to the TransactionType table (Need / Want).</summary>
     public int TypeId { get; set; }
     public string? TypeName { get; set; }   // populated via JOIN when reading back

@@ -27,9 +27,8 @@ public static class ConsoleDisplay
 
     public static void SectionHeader(string title)
     {
-        int max = 34 - title.Length;
         Console.ForegroundColor = ConsoleColor.DarkCyan;
-        Console.WriteLine($"\n  ┌─ {title} '─'{Math.Max(0, max)}┐");
+        Console.WriteLine($"\n  ┌─ {title} -┐");
         Console.ResetColor();
     }
 
@@ -42,8 +41,6 @@ public static class ConsoleDisplay
         Console.WriteLine($"  Date:        {row.Date:dd MMM yyyy}");
         Console.WriteLine($"  Description: {row.Description}");
         Console.WriteLine($"  Cost:        {row.Cost:C2}");
-        Console.WriteLine($"  Type:        {row.TypeRaw}");
-        Console.WriteLine($"  Sheet cat.:  {row.CategoryRaw}");
     }
 
     // -------------------------------------------------------------------------

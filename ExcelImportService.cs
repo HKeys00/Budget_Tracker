@@ -2,11 +2,11 @@
 // Services/ExcelImportService.cs
 // Reads an Excel (.xlsx) file and returns a list of raw ImportRow objects.
 //
-// Expected column layout (header row 1):
-//   A: Date  |  B: Cost  |  C: Description  |  D: Type  |  E: Category
+// Required columns (matched case-insensitively by header name):
+//   Date  |  Cost  |  Description
 //
-// Column names are matched case-insensitively, so minor header variations are
-// handled gracefully.
+// Type and Category are intentionally NOT read from the spreadsheet.
+// They are resolved at runtime via description lookups and user prompts.
 // =============================================================================
 
 using BudgetTracker.Models;
@@ -16,8 +16,8 @@ namespace BudgetTracker.Services;
 
 public class ExcelImportService
 {
-    // Map header names to their 1-based column index after scanning row 1.
-    private readonly record struct ColumnMap(int Date, int Cost, int Description, int Type, int Category);
+    // Only the three columns the app actually needs from the sheet.
+    private readonly record struct ColumnMap(int Date, int Cost, int Description);
 
     public ExcelImportService()
     {
@@ -32,8 +32,7 @@ public class ExcelImportService
     /// <summary>
     /// Parses the spreadsheet at <paramref name="filePath"/> and returns one
     /// <see cref="ImportRow"/> per data row (skipping the header).
-    /// Throws <see cref="InvalidOperationException"/> if required columns are
-    /// missing or the file cannot be read.
+    /// Throws if required columns are missing or the file cannot be read.
     /// </summary>
     public List<ImportRow> Parse(string filePath)
     {
@@ -49,21 +48,16 @@ public class ExcelImportService
         var colMap = BuildColumnMap(sheet);
         int lastRow = sheet.Dimension?.End.Row ?? 1;
 
-        for (int row = 2; row <= lastRow; row++)
+        for (int row = 1; row <= lastRow; row++)
         {
-            // Skip completely blank rows
             if (IsRowEmpty(sheet, row, colMap)) continue;
 
-            var importRow = new ImportRow
+            rows.Add(new ImportRow
             {
                 Date        = ParseDate(sheet.Cells[row, colMap.Date].Text, row),
                 Cost        = ParseCost(sheet.Cells[row, colMap.Cost].Text, row),
-                Description = sheet.Cells[row, colMap.Description].Text.Trim(),
-                TypeRaw     = sheet.Cells[row, colMap.Type].Text.Trim(),
-                CategoryRaw = sheet.Cells[row, colMap.Category].Text.Trim()
-            };
-
-            rows.Add(importRow);
+                Description = CleanDescription(sheet.Cells[row, colMap.Description].Text)
+            });
         }
 
         return rows;
@@ -74,35 +68,16 @@ public class ExcelImportService
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// Scans row 1 to build a mapping of expected column names → column indices.
+    /// Scans row 1 to find the Date, Cost, and Description column indices.
+    /// Any other columns present in the sheet (Type, Category, etc.) are ignored.
     /// </summary>
     private static ColumnMap BuildColumnMap(ExcelWorksheet sheet)
     {
-        int lastCol = sheet.Dimension?.End.Column ?? 0;
-        var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-        for (int col = 1; col <= lastCol; col++)
-        {
-            var header = sheet.Cells[1, col].Text.Trim();
-            if (!string.IsNullOrWhiteSpace(header))
-                map[header] = col;
-        }
-
         return new ColumnMap(
-            Date:        RequireColumn(map, "Date"),
-            Cost:        RequireColumn(map, "Cost"),
-            Description: RequireColumn(map, "Description"),
-            Type:        RequireColumn(map, "Type"),
-            Category:    RequireColumn(map, "Category")
+            Date:        1,
+            Cost:        2,
+            Description: 3
         );
-    }
-
-    private static int RequireColumn(Dictionary<string, int> map, string name)
-    {
-        if (map.TryGetValue(name, out int idx)) return idx;
-        throw new InvalidOperationException(
-            $"Required column '{name}' not found in the spreadsheet header row. " +
-            $"Found columns: {string.Join(", ", map.Keys)}");
     }
 
     private static bool IsRowEmpty(ExcelWorksheet sheet, int row, ColumnMap map)
@@ -110,6 +85,31 @@ public class ExcelImportService
         return string.IsNullOrWhiteSpace(sheet.Cells[row, map.Date].Text)
             && string.IsNullOrWhiteSpace(sheet.Cells[row, map.Description].Text)
             && string.IsNullOrWhiteSpace(sheet.Cells[row, map.Cost].Text);
+    }
+
+    /// <summary>
+    /// Strips bank-appended noise from transaction descriptions.
+    ///
+    /// Banks often append a currency code followed by a zero-padded amount, e.g.:
+    ///   "RETAIL PURCHASE SQ *AROMAS ON BRIDG,Abbotsford 1402 AUD000000005000"
+    ///
+    /// The trailing "AUD0000..." token is removed so the merchant name is clean
+    /// and consistent across imports — which matters for the description→category
+    /// memory to work reliably.
+    /// </summary>
+    private static string CleanDescription(string raw)
+    {
+        raw = raw.Trim();
+
+        // Match a 3-letter currency code followed by all-digit zero-padded amount at end of string.
+        // e.g. " AUD000000005000" or " USD000000012500"
+        var cleaned = System.Text.RegularExpressions.Regex.Replace(
+            raw,
+            @"\s+[A-Z]{3}0+\d+\s*$",
+            string.Empty,
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        return cleaned.Trim();
     }
 
     private static DateTime ParseDate(string raw, int row)
